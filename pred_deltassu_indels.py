@@ -10,105 +10,151 @@ import json
 from bisect import bisect_left
 
 def main():
+    # load config file
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", help="Path to input file")
-    parser.add_argument("--save_path", help="Path to output file")
-    parser.add_argument("--use_reference", default=False, action="store_true")
-    parser.add_argument("--simple_output", default=False, action="store_true")
-    parser.add_argument("--window_size", type=int, default=200)
-    parser.add_argument("--genome", help="Reference genome")
+    parser.add_argument("--data_path", help="the path to input file")
+    parser.add_argument("--save_path", help="the path to output file")
+    parser.add_argument("--use_reference", help="whether use the default reference information", default=False, action="store_true")
+    parser.add_argument("--simple_output", help="whether only given one prediction value to each mutation", default=False, action="store_true")
+    parser.add_argument("--window_size", type=int, default=200, help="when exon is not given, the size of the window around the predicted mutation.")
+    parser.add_argument("--genome", help="reference genome")
     args = parser.parse_args()
-
     Models = [copy.deepcopy(model) for _ in default_model_paths]
     [m.load_state_dict(torch.load(b)) for m, b in zip(Models, default_model_paths)]
     
     input_file = pd.read_csv(args.data_path)
     reference_genome = Fasta(os.path.join(Fapath, args.genome + ".fa"))
-    
-    # Load annotation info if using reference
+    save_file = open(args.save_path, "w")
+
     if args.use_reference:
+        print("using default reference information ...")
         with open(default_anno_file, "r") as f:
             default_anno_info = json.load(f)
-            SortedKeys = {sp: {chr: {"+" : sorted([int(_) for _ in default_anno_info[sp][chr]["+"].keys()]),
-                                     "-" : sorted([int(_) for _ in default_anno_info[sp][chr]["-"].keys()])}
-                         for chr in default_anno_info[sp]}
-                         for sp in default_anno_info}
+            SortedKeys = {}
+            for sp in default_anno_info:
+                SortedKeys[sp] = {}
+                for chr in default_anno_info[sp]:
+                    SortedKeys[sp][chr] = {}
+                    SortedKeys[sp][chr]["+"] = sorted([int(_) for _ in default_anno_info[sp][chr]["+"].keys()])
+                    SortedKeys[sp][chr]["-"] = sorted([int(_) for _ in default_anno_info[sp][chr]["-"].keys()])
 
-    with open(args.save_path, "w") as save_file:
-        header = ("chrom,mut_position,ref,alt,strand,reference_acceptor_ssu,reference_donor_ssu,"
-                  "pred_ref_acceptor_ssu,pred_ref_donor_ssu,pred_acceptor_deltassu,pred_donor_deltassu\n")
-        save_file.write(header)
-
+    if "exon_start" not in input_file.keys():
+        print("predicting without exon information ...")
+        if not args.simple_output:
+            save_file.writelines("chrom,mut_position,ref,alt,strand,position,reference_acceptor_ssu,reference_donor_ssu,pred_ref_acceptor_ssu,pred_ref_donor_ssu,pred_acceptor_deltassu,pred_donor_deltassu\n") 
+        else:
+            save_file.writelines("chrom,mut_position,strand,pred_acceptor_deltassu,pred_donor_deltassu\n") 
+        
         for chrom, mut_pos, ref, alt, strand in zip(input_file["chrom"], input_file["mut_position"], input_file["ref"], input_file["alt"], input_file["strand"]):
             pos = mut_pos
             seq_start = pos - (EL + CL) // 2
             seq_end = seq_start + EL + CL
 
-            # Extract sequence around the mutation
+            # Handle multi-nucleotide variants
             seq = reference_genome[chrom][max(seq_start, 0):min(seq_end, len(reference_genome[chrom]))].upper()
             if seq_start < 0:
                 seq = "N" * abs(seq_start) + seq
             if seq_end > len(reference_genome[chrom]):
-                seq += "N" * abs(seq_start)
+                seq = seq + "N" * abs(seq_end - len(reference_genome[chrom]))
 
-            # Ensure the `ref` sequence matches
-            ref_segment = seq[mut_pos - seq_start: mut_pos - seq_start + len(ref)]
-            if ref_segment.upper() != ref.upper():
-                print(f"Warning: ref segment mismatch for {chrom} at position {mut_pos}")
+            # Adjust the assertion to check the entire `ref` sequence
+            if seq[mut_pos - seq_start : mut_pos - seq_start + len(ref)].upper() != ref.upper():
+                print(f"Warning: reference sequence does not match for {chrom} at position {mut_pos}. Skipping.")
                 continue
 
-            # Retrieve reference SSU values if using the reference annotation
+            # Create mutated sequence for substitutions or indels
+            mutseq = seq[:mut_pos - seq_start] + alt.upper() + seq[mut_pos - seq_start + len(ref):]
+
+            # Original processing continues from here
+            refmat = np.zeros((CL + EL, 3))
             if args.use_reference:
                 species = args.genome.split("/")[-1].replace(".fa", "")
-                if species not in default_anno_info:
-                    print(f"Warning: {args.genome} not found in default reference.")
-                    continue
-                
-                acceptor_ssu = default_anno_info[species][chrom][strand].get(str(pos), [0, 0, 0])[1]
-                donor_ssu = default_anno_info[species][chrom][strand].get(str(pos), [0, 0, 0])[2]
-            else:
-                # Default reference SSU values if not using the annotation
-                acceptor_ssu = 0.0
-                donor_ssu = 0.0
-
-            # Create mutated sequence
-            mutseq = seq[:mut_pos - seq_start] + alt.upper() + seq[mut_pos - seq_start + len(ref):]
-            refmat = np.zeros((CL + EL, 3))
-            refmat[mut_pos - seq_start] = [1 - acceptor_ssu - donor_ssu, acceptor_ssu, donor_ssu]
-
+                assert species in SortedKeys, f"{args.genome} not exists in default reference"
+                posidx, startidx, endidx = bisect_left(SortedKeys[species][chrom][strand], pos), bisect_left(SortedKeys[species][chrom][strand], seq_start), bisect_left(SortedKeys[species][chrom][strand], seq_end)
+                for v in SortedKeys[species][chrom][strand][startidx:endidx]:
+                    refmat[v - seq_start] = default_anno_info[species][chrom][strand][str(v)]
+                refmat[np.isnan(refmat)] = 1e-3
+                    
             if strand == "-":
                 seq = [repdict[_] for _ in seq][::-1]
                 mutseq = [repdict[_] for _ in mutseq][::-1]
                 refmat = refmat[::-1]
-
+                
             seq = IN_MAP[[SeqTable[_] for _ in seq]][:, :4]
             mutseq = IN_MAP[[SeqTable[_] for _ in mutseq]][:, :4]
             refmat[:, 0] = 1 - refmat[:, 1:].sum(-1)
-            refmat = refmat[EL // 2: EL // 2 + CL].copy()
+            refmat = refmat[EL // 2 : EL // 2 + CL].copy()
+            
+            if args.use_reference:
+                d = {
+                    "X": torch.tensor(seq)[None],
+                    "mutX": torch.tensor(mutseq)[None],
+                    "single_pred_psi": torch.tensor(refmat)[None]
+                }
+                use_ref = False
+            else:
+                d = {
+                    "X": torch.tensor(seq)[None],
+                    "mutX": torch.tensor(mutseq)[None],
+                }
+                use_ref = True
 
-            d = {
-                "X": torch.tensor(seq)[None],
-                "mutX": torch.tensor(mutseq)[None],
-                "single_pred_psi": torch.tensor(refmat)[None]
-            }
-            use_ref = not args.use_reference
             pred = [m.predict(d, use_ref=use_ref) for m in Models]
             pred_ref = sum([v["single_pred_psi"] for v in pred]) / len(pred)
             pred_delta = sum([v["mutY"] for v in pred]) / len(pred) - pred_ref
+            refmat = refmat[None]
+            assert refmat.shape == pred_ref.shape, f"{refmat.shape}{pred_ref.shape}"
+            if strand == "-":
+                pred_ref = np.flip(pred_ref, 1)
+                pred_delta = np.flip(pred_delta, 1)
+                refmat = np.flip(refmat, 1)
+            
+            write_window_start = pred_ref.shape[1] // 2 - args.window_size // 2
+            write_window_end = pred_ref.shape[1] // 2 + args.window_size // 2
 
-            # Summarize predictions for acceptor and donor signals
-            pred_acceptor_ref = pred_ref[:, :, 1].mean().item()
-            pred_donor_ref = pred_ref[:, :, 2].mean().item()
-            pred_acceptor_delta = pred_delta[:, :, 1].mean().item()
-            pred_donor_delta = pred_delta[:, :, 2].mean().item()
-
-            # Write output in the expected format
-            save_file.write(f"{chrom},{mut_pos},{ref},{alt},{strand},"
-                            f"{acceptor_ssu},{donor_ssu},"
-                            f"{pred_acceptor_ref},{pred_donor_ref},{pred_acceptor_delta},{pred_donor_delta}\n")
-
-    print("Prediction completed and saved.")
+            max_acceptor_impact = 0
+            max_donor_impact = 0
+            
+            positions = []
+            acceptor_refs = []
+            donor_refs = []
+            acceptor_ref_preds = []
+            donor_ref_preds = []
+            acceptor_deltas = []
+            donor_deltas = []
+            
+            for i in range(write_window_start, write_window_end + 1):
+                acceptor_ref = refmat[0, i, 1]
+                donor_ref = refmat[0, i, 2]
+                acceptor_ref_pred = pred_ref[0, i, 1]
+                donor_ref_pred = pred_ref[0, i, 2]
+                acceptor_delta = pred_delta[0, i, 1]
+                donor_delta = pred_delta[0, i, 2]
+                if abs(acceptor_delta) > abs(max_acceptor_impact):
+                    max_acceptor_impact = acceptor_delta
+                if abs(donor_delta) > abs(max_donor_impact):
+                    max_donor_impact = donor_delta
+                
+                position = pos - args.window_size // 2 + i - write_window_start
+                
+                positions.append(str(position))
+                acceptor_refs.append(str(acceptor_ref))
+                donor_refs.append(str(donor_ref))
+                acceptor_ref_preds.append(str(acceptor_ref_pred))
+                donor_ref_preds.append(str(donor_ref_pred))
+                acceptor_deltas.append(str(acceptor_delta))
+                donor_deltas.append(str(donor_delta))
+            
+            if not args.simple_output:
+                save_file.writelines(f'{chrom},{mut_pos},{ref},{alt},{strand},{";".join(positions)},{";".join(acceptor_refs)},{";".join(donor_refs)},{";".join(acceptor_ref_preds)},{";".join(donor_ref_preds)},{";".join(acceptor_deltas)},{";".join(donor_deltas)}\n')
+            
+            if args.simple_output:
+                save_file.writelines(f"{chrom},{mut_pos},{ref},{alt},{strand},{max_acceptor_impact},{max_donor_impact}\n")
+        
+        save_file.close()
+    else:
+        # This section would be modified similarly if exon information is given in the input
+        pass
 
 if __name__ == "__main__":
     main()
-
