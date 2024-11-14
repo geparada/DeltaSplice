@@ -25,8 +25,16 @@ def main():
     input_file = pd.read_csv(args.data_path)
     reference_genome = Fasta(os.path.join(Fapath, args.genome + ".fa"))
     
+    # Load annotation info if using reference
+    if args.use_reference:
+        with open(default_anno_file, "r") as f:
+            default_anno_info = json.load(f)
+            SortedKeys = {sp: {chr: {"+" : sorted([int(_) for _ in default_anno_info[sp][chr]["+"].keys()]),
+                                     "-" : sorted([int(_) for _ in default_anno_info[sp][chr]["-"].keys()])}
+                         for chr in default_anno_info[sp]}
+                         for sp in default_anno_info}
+
     with open(args.save_path, "w") as save_file:
-        # Write header to the output file
         header = ("chrom,mut_position,ref,alt,strand,reference_acceptor_ssu,reference_donor_ssu,"
                   "pred_ref_acceptor_ssu,pred_ref_donor_ssu,pred_acceptor_deltassu,pred_donor_deltassu\n")
         save_file.write(header)
@@ -49,21 +57,24 @@ def main():
                 print(f"Warning: ref segment mismatch for {chrom} at position {mut_pos}")
                 continue
 
-            # Create mutated sequence
-            mutseq = seq[:mut_pos - seq_start] + alt.upper() + seq[mut_pos - seq_start + len(ref):]
-            refmat = np.zeros((CL + EL, 3))
-
+            # Retrieve reference SSU values if using the reference annotation
             if args.use_reference:
                 species = args.genome.split("/")[-1].replace(".fa", "")
                 if species not in default_anno_info:
                     print(f"Warning: {args.genome} not found in default reference.")
                     continue
-                posidx = bisect_left(SortedKeys[species][chrom][strand], pos)
-                startidx = bisect_left(SortedKeys[species][chrom][strand], seq_start)
-                endidx = bisect_left(SortedKeys[species][chrom][strand], seq_end)
-                for v in SortedKeys[species][chrom][strand][startidx:endidx]:
-                    refmat[v - seq_start] = default_anno_info[species][chrom][strand][str(v)]
-                refmat[np.isnan(refmat)] = 1e-3
+                
+                acceptor_ssu = default_anno_info[species][chrom][strand].get(str(pos), [0, 0, 0])[1]
+                donor_ssu = default_anno_info[species][chrom][strand].get(str(pos), [0, 0, 0])[2]
+            else:
+                # Default reference SSU values if not using the annotation
+                acceptor_ssu = 0.0
+                donor_ssu = 0.0
+
+            # Create mutated sequence
+            mutseq = seq[:mut_pos - seq_start] + alt.upper() + seq[mut_pos - seq_start + len(ref):]
+            refmat = np.zeros((CL + EL, 3))
+            refmat[mut_pos - seq_start] = [1 - acceptor_ssu - donor_ssu, acceptor_ssu, donor_ssu]
 
             if strand == "-":
                 seq = [repdict[_] for _ in seq][::-1]
@@ -91,9 +102,9 @@ def main():
             pred_acceptor_delta = pred_delta[:, :, 1].mean().item()
             pred_donor_delta = pred_delta[:, :, 2].mean().item()
 
-            # Write output in a simplified format
+            # Write output in the expected format
             save_file.write(f"{chrom},{mut_pos},{ref},{alt},{strand},"
-                            f"{refmat[:, 1].mean()},{refmat[:, 2].mean()},"
+                            f"{acceptor_ssu},{donor_ssu},"
                             f"{pred_acceptor_ref},{pred_donor_ref},{pred_acceptor_delta},{pred_donor_delta}\n")
 
     print("Prediction completed and saved.")
