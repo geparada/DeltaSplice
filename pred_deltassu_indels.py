@@ -24,25 +24,18 @@ def main():
     
     input_file = pd.read_csv(args.data_path)
     reference_genome = Fasta(os.path.join(Fapath, args.genome + ".fa"))
-    save_file = open(args.save_path, "w")
+    
+    with open(args.save_path, "w") as save_file:
+        # Write header to the output file
+        if "exon_start" not in input_file.keys():
+            if args.simple_output:
+                header = "chrom,mut_position,strand,pred_acceptor_deltassu,pred_donor_deltassu\n"
+            else:
+                header = ("chrom,mut_position,ref,alt,strand,position,reference_acceptor_ssu,reference_donor_ssu,"
+                          "pred_ref_acceptor_ssu,pred_ref_donor_ssu,pred_acceptor_deltassu,pred_donor_deltassu\n")
+            save_file.write(header)
 
-    if args.use_reference:
-        with open(default_anno_file, "r") as f:
-            default_anno_info = json.load(f)
-            SortedKeys = {sp: {chr: {"+" : sorted([int(_) for _ in default_anno_info[sp][chr]["+"].keys()]),
-                                     "-" : sorted([int(_) for _ in default_anno_info[sp][chr]["-"].keys()])}
-                         for chr in default_anno_info[sp]}
-                         for sp in default_anno_info}
-
-    # Header output
-    if "exon_start" not in input_file.keys():
-        header = ("chrom,mut_position,ref,alt,strand,position,reference_acceptor_ssu,reference_donor_ssu,"
-                  "pred_ref_acceptor_ssu,pred_ref_donor_ssu,pred_acceptor_deltassu,pred_donor_deltassu\n")
-        if args.simple_output:
-            header = "chrom,mut_position,strand,pred_acceptor_deltassu,pred_donor_deltassu\n"
-        save_file.write(header)
-
-        for chrom, mut_pos, ref, alt, strand in zip(input_file["chrom"], input_file["mut_position"], input_file["ref"], input_file["alt"], input_file["strand"]):
+        for idx, (chrom, mut_pos, ref, alt, strand) in enumerate(zip(input_file["chrom"], input_file["mut_position"], input_file["ref"], input_file["alt"], input_file["strand"])):
             pos = mut_pos
             seq_start = pos - (EL + CL) // 2
             seq_end = seq_start + EL + CL
@@ -52,21 +45,23 @@ def main():
             if seq_start < 0:
                 seq = "N" * abs(seq_start) + seq
             if seq_end > len(reference_genome[chrom]):
-                seq = seq + "N" * abs(seq_start)
+                seq += "N" * abs(seq_start)
 
             # Ensure the `ref` sequence matches
             ref_segment = seq[mut_pos - seq_start: mut_pos - seq_start + len(ref)]
-            assert ref_segment.upper() == ref.upper(), (
-                f"Expected ref segment {ref}, but found {ref_segment} at position {mut_pos}"
-            )
+            if ref_segment.upper() != ref.upper():
+                print(f"Warning: ref segment mismatch for {chrom} at position {mut_pos}")
+                continue
 
-            # Create mutated sequence with variable ref/alt lengths
+            # Create mutated sequence
             mutseq = seq[:mut_pos - seq_start] + alt.upper() + seq[mut_pos - seq_start + len(ref):]
-
             refmat = np.zeros((CL + EL, 3))
+
             if args.use_reference:
                 species = args.genome.split("/")[-1].replace(".fa", "")
-                assert species in SortedKeys, f"{args.genome} not in default reference"
+                if species not in SortedKeys:
+                    print(f"Warning: {args.genome} not found in default reference.")
+                    continue
                 posidx = bisect_left(SortedKeys[species][chrom][strand], pos)
                 startidx = bisect_left(SortedKeys[species][chrom][strand], seq_start)
                 endidx = bisect_left(SortedKeys[species][chrom][strand], seq_end)
@@ -94,7 +89,6 @@ def main():
             pred_ref = sum([v["single_pred_psi"] for v in pred]) / len(pred)
             pred_delta = sum([v["mutY"] for v in pred]) / len(pred) - pred_ref
 
-            # Adjust prediction window for output
             write_window_start = pred_ref.shape[1] // 2 - args.window_size // 2
             write_window_end = pred_ref.shape[1] // 2 + args.window_size // 2
 
@@ -107,8 +101,9 @@ def main():
                 )
             else:
                 save_file.write(f"{chrom},{mut_pos},{ref},{alt},{strand},{pred_delta[0, write_window_start, 1]},{pred_delta[0, write_window_start, 2]}\n")
-        
-        save_file.close()
+            save_file.flush()  # Ensure each line is written immediately
+
+    print("Prediction completed and saved.")
 
 if __name__ == "__main__":
     main()
