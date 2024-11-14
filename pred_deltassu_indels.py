@@ -163,4 +163,12 @@ def main():
                 save_file.writelines(f'{chrom},{mut_pos},{ref},{alt},{strand},{";".join(positions)},{";".join(acceptor_refs)},{";".join(donor_refs)},{";".join(acceptor_ref_preds)},{";".join(donor_ref_preds)},{";".join(acceptor_deltas)},{";".join(donor_deltas)}\n')
 
             if args.simple_output:
-                save_file.writelines(f"{chrom},{mut_pos},{ref},{alt},{strand},{
+                save_file.writelines(f"{chrom},{mut_pos},{ref},{alt},{strand},{max_acceptor_impact},{max_donor_impact}\n")
+        
+        save_file.close()
+    else:
+        # This section would be modified similarly if exon information is given in the input
+        pass
+
+if __name__ == "__main__":
+    main()
