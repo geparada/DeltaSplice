@@ -38,6 +38,7 @@ def main():
                     SortedKeys[sp][chr]["+"] = sorted([int(_) for _ in default_anno_info[sp][chr]["+"].keys()])
                     SortedKeys[sp][chr]["-"] = sorted([int(_) for _ in default_anno_info[sp][chr]["-"].keys()])
 
+    # Write header for the output file
     if "exon_start" not in input_file.keys():
         print("predicting without exon information ...")
         if not args.simple_output:
@@ -45,27 +46,35 @@ def main():
         else:
             save_file.writelines("chrom,mut_position,strand,pred_acceptor_deltassu,pred_donor_deltassu\n") 
         
+        # Process each mutation
         for chrom, mut_pos, ref, alt, strand in zip(input_file["chrom"], input_file["mut_position"], input_file["ref"], input_file["alt"], input_file["strand"]):
             pos = mut_pos
             seq_start = pos - (EL + CL) // 2
             seq_end = seq_start + EL + CL
 
-            # Handle multi-nucleotide variants
+            # Debug: Output mutation information
+            print(f"Processing mutation: {chrom}:{mut_pos} {ref}>{alt} ({strand})")
+
+            # Handle sequence extraction with multi-nucleotide variants
             seq = reference_genome[chrom][max(seq_start, 0):min(seq_end, len(reference_genome[chrom]))].upper()
             if seq_start < 0:
                 seq = "N" * abs(seq_start) + seq
             if seq_end > len(reference_genome[chrom]):
                 seq = seq + "N" * abs(seq_end - len(reference_genome[chrom]))
 
-            # Adjust the assertion to check the entire `ref` sequence
-            if seq[mut_pos - seq_start : mut_pos - seq_start + len(ref)].upper() != ref.upper():
-                print(f"Warning: reference sequence does not match for {chrom} at position {mut_pos}. Skipping.")
+            # Check reference matching for multi-nucleotide variants
+            ref_segment = seq[mut_pos - seq_start : mut_pos - seq_start + len(ref)]
+            if ref_segment.upper() != ref.upper():
+                print(f"Warning: reference sequence does not match for {chrom} at position {mut_pos}. Expected {ref}, found {ref_segment}. Skipping.")
                 continue
+
+            # Debug: Confirm sequence mutation application
+            print(f"Reference sequence matched: {ref_segment}. Applying mutation.")
 
             # Create mutated sequence for substitutions or indels
             mutseq = seq[:mut_pos - seq_start] + alt.upper() + seq[mut_pos - seq_start + len(ref):]
 
-            # Original processing continues from here
+            # Process reference matrix
             refmat = np.zeros((CL + EL, 3))
             if args.use_reference:
                 species = args.genome.split("/")[-1].replace(".fa", "")
@@ -74,17 +83,19 @@ def main():
                 for v in SortedKeys[species][chrom][strand][startidx:endidx]:
                     refmat[v - seq_start] = default_anno_info[species][chrom][strand][str(v)]
                 refmat[np.isnan(refmat)] = 1e-3
-                    
+
+            # Reverse complement if strand is "-"
             if strand == "-":
                 seq = [repdict[_] for _ in seq][::-1]
                 mutseq = [repdict[_] for _ in mutseq][::-1]
                 refmat = refmat[::-1]
-                
+
             seq = IN_MAP[[SeqTable[_] for _ in seq]][:, :4]
             mutseq = IN_MAP[[SeqTable[_] for _ in mutseq]][:, :4]
             refmat[:, 0] = 1 - refmat[:, 1:].sum(-1)
             refmat = refmat[EL // 2 : EL // 2 + CL].copy()
-            
+
+            # Prepare the model input
             if args.use_reference:
                 d = {
                     "X": torch.tensor(seq)[None],
@@ -99,6 +110,7 @@ def main():
                 }
                 use_ref = True
 
+            # Model prediction
             pred = [m.predict(d, use_ref=use_ref) for m in Models]
             pred_ref = sum([v["single_pred_psi"] for v in pred]) / len(pred)
             pred_delta = sum([v["mutY"] for v in pred]) / len(pred) - pred_ref
@@ -108,13 +120,14 @@ def main():
                 pred_ref = np.flip(pred_ref, 1)
                 pred_delta = np.flip(pred_delta, 1)
                 refmat = np.flip(refmat, 1)
-            
+
+            # Summarize predictions for output
             write_window_start = pred_ref.shape[1] // 2 - args.window_size // 2
             write_window_end = pred_ref.shape[1] // 2 + args.window_size // 2
 
             max_acceptor_impact = 0
             max_donor_impact = 0
-            
+
             positions = []
             acceptor_refs = []
             donor_refs = []
@@ -122,7 +135,7 @@ def main():
             donor_ref_preds = []
             acceptor_deltas = []
             donor_deltas = []
-            
+
             for i in range(write_window_start, write_window_end + 1):
                 acceptor_ref = refmat[0, i, 1]
                 donor_ref = refmat[0, i, 2]
@@ -134,9 +147,9 @@ def main():
                     max_acceptor_impact = acceptor_delta
                 if abs(donor_delta) > abs(max_donor_impact):
                     max_donor_impact = donor_delta
-                
+
                 position = pos - args.window_size // 2 + i - write_window_start
-                
+
                 positions.append(str(position))
                 acceptor_refs.append(str(acceptor_ref))
                 donor_refs.append(str(donor_ref))
@@ -144,17 +157,10 @@ def main():
                 donor_ref_preds.append(str(donor_ref_pred))
                 acceptor_deltas.append(str(acceptor_delta))
                 donor_deltas.append(str(donor_delta))
-            
+
+            # Output result
             if not args.simple_output:
                 save_file.writelines(f'{chrom},{mut_pos},{ref},{alt},{strand},{";".join(positions)},{";".join(acceptor_refs)},{";".join(donor_refs)},{";".join(acceptor_ref_preds)},{";".join(donor_ref_preds)},{";".join(acceptor_deltas)},{";".join(donor_deltas)}\n')
-            
-            if args.simple_output:
-                save_file.writelines(f"{chrom},{mut_pos},{ref},{alt},{strand},{max_acceptor_impact},{max_donor_impact}\n")
-        
-        save_file.close()
-    else:
-        # This section would be modified similarly if exon information is given in the input
-        pass
 
-if __name__ == "__main__":
-    main()
+            if args.simple_output:
+                save_file.writelines(f"{chrom},{mut_pos},{ref},{alt},{strand},{
