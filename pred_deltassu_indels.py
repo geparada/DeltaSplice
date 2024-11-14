@@ -27,15 +27,11 @@ def main():
     
     with open(args.save_path, "w") as save_file:
         # Write header to the output file
-        if "exon_start" not in input_file.keys():
-            if args.simple_output:
-                header = "chrom,mut_position,strand,pred_acceptor_deltassu,pred_donor_deltassu\n"
-            else:
-                header = ("chrom,mut_position,ref,alt,strand,position,reference_acceptor_ssu,reference_donor_ssu,"
-                          "pred_ref_acceptor_ssu,pred_ref_donor_ssu,pred_acceptor_deltassu,pred_donor_deltassu\n")
-            save_file.write(header)
+        header = ("chrom,mut_position,ref,alt,strand,reference_acceptor_ssu,reference_donor_ssu,"
+                  "pred_ref_acceptor_ssu,pred_ref_donor_ssu,pred_acceptor_deltassu,pred_donor_deltassu\n")
+        save_file.write(header)
 
-        for idx, (chrom, mut_pos, ref, alt, strand) in enumerate(zip(input_file["chrom"], input_file["mut_position"], input_file["ref"], input_file["alt"], input_file["strand"])):
+        for chrom, mut_pos, ref, alt, strand in zip(input_file["chrom"], input_file["mut_position"], input_file["ref"], input_file["alt"], input_file["strand"]):
             pos = mut_pos
             seq_start = pos - (EL + CL) // 2
             seq_end = seq_start + EL + CL
@@ -59,7 +55,7 @@ def main():
 
             if args.use_reference:
                 species = args.genome.split("/")[-1].replace(".fa", "")
-                if species not in SortedKeys:
+                if species not in default_anno_info:
                     print(f"Warning: {args.genome} not found in default reference.")
                     continue
                 posidx = bisect_left(SortedKeys[species][chrom][strand], pos)
@@ -89,21 +85,19 @@ def main():
             pred_ref = sum([v["single_pred_psi"] for v in pred]) / len(pred)
             pred_delta = sum([v["mutY"] for v in pred]) / len(pred) - pred_ref
 
-            write_window_start = pred_ref.shape[1] // 2 - args.window_size // 2
-            write_window_end = pred_ref.shape[1] // 2 + args.window_size // 2
+            # Summarize predictions for acceptor and donor signals
+            pred_acceptor_ref = pred_ref[:, :, 1].mean().item()
+            pred_donor_ref = pred_ref[:, :, 2].mean().item()
+            pred_acceptor_delta = pred_delta[:, :, 1].mean().item()
+            pred_donor_delta = pred_delta[:, :, 2].mean().item()
 
-            if not args.simple_output:
-                save_file.write(
-                    f"{chrom},{mut_pos},{ref},{alt},{strand},"
-                    + ";".join(map(str, [pos - args.window_size // 2 + i - write_window_start for i in range(write_window_start, write_window_end + 1)]))
-                    + "," + ";".join(map(str, [pred_ref[0, i, 1] for i in range(write_window_start, write_window_end + 1)]))
-                    + "," + ";".join(map(str, [pred_delta[0, i, 1] for i in range(write_window_start, write_window_end + 1)])) + "\n"
-                )
-            else:
-                save_file.write(f"{chrom},{mut_pos},{ref},{alt},{strand},{pred_delta[0, write_window_start, 1]},{pred_delta[0, write_window_start, 2]}\n")
-            save_file.flush()  # Ensure each line is written immediately
+            # Write output in a simplified format
+            save_file.write(f"{chrom},{mut_pos},{ref},{alt},{strand},"
+                            f"{refmat[:, 1].mean()},{refmat[:, 2].mean()},"
+                            f"{pred_acceptor_ref},{pred_donor_ref},{pred_acceptor_delta},{pred_donor_delta}\n")
 
     print("Prediction completed and saved.")
 
 if __name__ == "__main__":
     main()
+
