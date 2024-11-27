@@ -1,3 +1,5 @@
+This is a forked copy of DeltaSplice
+
 # DeltaSplice 
 
 A neural network model to predict splice site usage and splicing-altering mutations
